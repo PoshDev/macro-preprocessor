@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+
+import sys
+import glob
+import itertools
+import argparse
+import os
+import re
+
+DEFAULT_FILE_NAME="<unknown file obj>"
+
+class SourceState:
+    OUTSIDE = 0
+    INSIDE = 1
+
+class ProcessingState:
+    WAITING_FOR_OPEN = 0
+    WAITING_FOR_CLOSE = 1
+    WAITING_FOR_COMMA = 2
+
+class Location:
+    def __init__(self, line, file_name=DEFAULT_FILE_NAME):
+        self.line = line
+        self.file_name = file_name
+
+    def __str__(self):
+        return "%s:%d" % (self.file_name, self.line)
+
+    def __repr__(self):
+        return str(self)
+
+class Macro:
+    def __init__(self, name, arg_names, body, location=None):
+        self.name = name
+        self.arg_names = arg_names
+        self.body = body
+        self.location = location
+
+    def run(self, arg_vals):
+        out = self.body
+        if len(arg_vals) != len(self.arg_names):
+            raise RuntimeError("Invalid number of arguments (got %d, expected %d) in macro %s" % \
+                    (len(arg_vals), len(self.arg_names), self.name))
+        for name, val in zip(self.arg_names, arg_vals):
+            out = out.replace(name, val)
+        return out
+
+    def __str__(self):
+        return "macro %s(%s) @%s" % (self.name, ", ".join(self.arg_names), self.location)
+
+    def __repr__(self):
+        return str(self)
+
+class Preprocessor:
+    def __init__(self, comment="//"):
+        self.macros = dict()
+        self.comment = comment
+        self._make_regexps()
+
+    def _make_regexps(self):
+        self.macro_start = re.compile(r"^\s*" + re.escape(self.comment) + 
+                r"#define ([A-Za-z0-9_]+)\(\s*([A-Za-z0-9_]+(?:\s*,\s*[A-Za-z0-9_]+)*)\s*\)\s*$")
+        self.macro_end = re.compile(r"^\s*" + re.escape(self.comment) + 
+                r"#end\s*$")
+        self.arg_list_replace = re.compile(r"\s*,\s*")
+        self.macro_usage = re.compile(r"^" + re.escape(self.comment) +
+                r"#macro ([A-Za-z0-9_]+)\(\s*(.*)\s*\)\s*$")
+
+    def add_macros_from(self, macro_file, file_name=DEFAULT_FILE_NAME):
+        state = SourceState.OUTSIDE
+        name = None
+        args = None
+        body = None
+        macro_loc = None
+        for i, line in enumerate(macro_file):
+            loc = Location(i + 1, file_name)
+            if state == SourceState.OUTSIDE:
+                match = self.macro_start.match(line)
+                if match is not None:
+                    name = match.group(1)
+                    if name in self.macros:
+                        print("WARNING: %s. Macro %s was already defined at %s." \
+                                % (loc, name, self.macros[name].location), file=sys.stderr)
+                    args = self.arg_list_replace.split(match.group(2))
+                    body = "" 
+                    macro_loc = loc
+                    state = SourceState.INSIDE
+            elif state == SourceState.INSIDE:
+                match = self.macro_end.match(line)
+                if match is not None:
+                    body = body.strip()
+                    self.macros[name] = Macro(name, args, body, location=macro_loc) 
+                    state = SourceState.OUTSIDE
+                else:
+                    body += line
+            else:
+                assert False, "Invalid state."
+        if state == SourceState.INSIDE:
+            raise RuntimeError("%s. Missing #end tag for macro: %s" % (loc, name))
+        return self
+
+    def _parse_args(self, arg_list, loc):
+        args = []
+        state = ProcessingState.WAITING_FOR_OPEN
+        parens = 0
+        err_msg = "%s. Illegal syntax for arg list: %s. Arguments must be wrapped in parentheses (). Check if parentheses are balanced." % (loc, arg_list)
+        arg = ""
+        for c in arg_list:
+            if state == ProcessingState.WAITING_FOR_OPEN:
+                if c == "(":
+                    parens = 1
+                    arg = ""
+                    state = ProcessingState.WAITING_FOR_CLOSE
+                elif c not in " \t":
+                    raise RuntimeError(err_msg)
+            elif state == ProcessingState.WAITING_FOR_CLOSE:
+                if c == "(":
+                    arg += c
+                    parens += 1
+                elif c == ")":
+                    parens -= 1
+                    if parens == 0:
+                        args.append(arg)
+                        state = ProcessingState.WAITING_FOR_COMMA
+                    else:
+                        arg += c
+                else:
+                    arg += c
+            elif state == ProcessingState.WAITING_FOR_COMMA:
+                if c == ",":
+                    state = ProcessingState.WAITING_FOR_OPEN
+                elif c not in " \t":
+                    raise RuntimeError(err_msg)
+            else:
+                assert False, "Illegal state."
+        if parens != 0:
+            raise RuntimeError("%s. Unbalanced parenthesis in arg list: %s" % (loc, arg_list))
+        if state == ProcessingState.WAITING_FOR_OPEN and len(args) > 0:
+            raise RuntimeError("%s. Trailing comma in arg list: %s" % (loc, arg_list))
+        return args
+
+    def process(self, go_file, file_name=DEFAULT_FILE_NAME):
+        for i, line in enumerate(go_file):
+            loc = Location(i + 1, file_name)
+            match = self.macro_usage.match(line)
+            if match is not None:
+                name = match.group(1)
+                arg_list = self._parse_args(match.group(2), loc)
+                if name not in self.macros:
+                    raise RuntimeError("%s. Macro %s not defined." % (loc, name))
+                try:
+                    body = self.macros[name].run(arg_list)
+                except RuntimeError as e:
+                    raise RuntimeError("%s. Error encountered while running macro %s: %s" % (loc, name, e))
+                for newline in body.split("\n"):
+                    yield "%s\n" % newline
+            else:
+                yield line
+    
+    @classmethod
+    def preprocess(cls, macros=None, outfile="/dev/stdout", infile="/dev/stdin", comment="//"):
+        self = cls(comment)
+        for macro in macros:
+            with open(macro, "r") as f:
+                self.add_macros_from(f, file_name=macro)
+        with open(infile, "r") as f:
+            with open(outfile, "w") as of:
+                for line in self.process(f, infile):
+                    of.write(line)
+
+        # print(self.macros)
+        # print(self.macros["SUM"].body)
+        # print(self.macros["SUM"].run(["int", "blah", "blahh"]))
+        return self
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Simple string-based (no AST) preprocessing for Golang')
+    parser.add_argument('-m', '--macros', type=str, nargs='+', dest="macros",
+                                help='files to be used to define macros')
+    parser.add_argument('-i', '--input', type=str, dest="infile", default="&0",
+                                help='file to preprocess')
+    parser.add_argument('-o', '--output', type=str, dest="outfile", default="&1",
+                                help='postprocessed file saved to')
+    parser.add_argument('-c', '--comment', type=str, dest="comment", default="//",
+                                help='string for starting a line comment')
+    args = vars(parser.parse_args())
+    args["macros"] = list(itertools.chain.from_iterable(map(glob.glob, args["macros"] or [])))
+    special_replace = {"&0": "/dev/stdin",
+            "&1": "/dev/stdout", "&2": "/dev/stderr", "-": "/dev/stdout"}
+    args["infile"] = special_replace.get(args["infile"], args["infile"])
+    args["outfile"] = special_replace.get(args["outfile"], args["outfile"])
+    for macro in args["macros"]:
+        assert os.path.exists(macro), macro
+    assert os.path.exists(args["infile"]), args["infile"]
+    Preprocessor.preprocess(**args)
