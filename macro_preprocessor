@@ -51,53 +51,85 @@ class Macro:
     def __repr__(self):
         return str(self)
 
-class Preprocessor:
+class MacroRegexps():
     def __init__(self, comment="//"):
-        self.macros = dict()
-        self.comment = comment
-        self._make_regexps()
-
-    def _make_regexps(self):
-        self.macro_start = re.compile(r"^\s*" + re.escape(self.comment) + 
+        self.macro_start = re.compile(r"^\s*" + re.escape(comment) + 
                 r"#define ([A-Za-z0-9_]+)\(\s*([A-Za-z0-9_]+(?:\s*,\s*[A-Za-z0-9_]+)*)\s*\)\s*$")
-        self.macro_end = re.compile(r"^\s*" + re.escape(self.comment) + 
+        self.macro_start = re.compile(r"^\s*" + re.escape(comment) + 
+                r"#define ([A-Za-z0-9_]+)\(\s*([A-Za-z0-9_]+(?:\s*,\s*[A-Za-z0-9_]+)*)\s*\)\s*$")
+        self.macro_end = re.compile(r"^\s*" + re.escape(comment) + 
                 r"#end\s*$")
+        self.import_statement = re.compile(r"^\s*" + re.escape(comment) + 
+                r"#import \s*(\S.*)\s*$")
         self.arg_list_replace = re.compile(r"\s*,\s*")
-        self.macro_usage = re.compile(r"^" + re.escape(self.comment) +
+        self.macro_usage = re.compile(r"^" + re.escape(comment) +
                 r"#macro ([A-Za-z0-9_]+)\(\s*(.*)\s*\)\s*$")
 
-    def add_macros_from(self, macro_file, file_name=DEFAULT_FILE_NAME):
-        state = SourceState.OUTSIDE
-        name = None
-        args = None
-        body = None
+class MacroAdder():
+    def __init__(self, regexps, base_macros=None):
+        self.regexps = regexps
+        self.macros = dict()
+        if base_macros is not None:
+            self.macros.update(base_macros)
+        self.state = SourceState.OUTSIDE
+        self.name = None
+        self.args = None
+        self.body = None
+        self.macro_loc = None
+
+    def process_line(self, line, loc=None):
+        '''
+        Returns whether or not the line was captured
+        '''
+        if self.state == SourceState.OUTSIDE:
+            match = self.regexps.macro_start.match(line)
+            if match is not None:
+                self.name = match.group(1)
+                if self.name in self.macros:
+                    print("WARNING: %s. Macro %s was already defined at %s." \
+                            % (loc, self.name, self.macros[self.name].location), file=sys.stderr)
+                self.args = self.regexps.arg_list_replace.split(match.group(2))
+                self.body = "" 
+                self.macro_loc = loc
+                self.state = SourceState.INSIDE
+                return True
+            else:
+                return False
+        elif self.state == SourceState.INSIDE:
+            match = self.regexps.macro_end.match(line)
+            if match is not None:
+                self.body = self.body.strip()
+                self.macros[self.name] = Macro(self.name, self.args, self.body, location=self.macro_loc) 
+                self.state = SourceState.OUTSIDE
+                return True
+            else:
+                self.body += line
+                return True
+        else:
+            assert False, "Invalid state."
+
+    def close(self, loc=None):
+        if self.state == SourceState.INSIDE:
+            raise RuntimeError("%s. Missing #end tag for macro: %s" % (loc, self.name))
+        return self.macros
+
+class Preprocessor:
+    def __init__(self, comment="//", allow_source_defs=True):
+        self.macros = dict()
+        self.comment = comment
+        self.allow_source_defs = allow_source_defs
+        self.regexps = MacroRegexps(comment)
+
+    def add_macros_from(self, macro_file, file_name=DEFAULT_FILE_NAME, local=False):
         macro_loc = None
+        adder = MacroAdder(self.regexps, base_macros=self.macros)
         for i, line in enumerate(macro_file):
             loc = Location(i + 1, file_name)
-            if state == SourceState.OUTSIDE:
-                match = self.macro_start.match(line)
-                if match is not None:
-                    name = match.group(1)
-                    if name in self.macros:
-                        print("WARNING: %s. Macro %s was already defined at %s." \
-                                % (loc, name, self.macros[name].location), file=sys.stderr)
-                    args = self.arg_list_replace.split(match.group(2))
-                    body = "" 
-                    macro_loc = loc
-                    state = SourceState.INSIDE
-            elif state == SourceState.INSIDE:
-                match = self.macro_end.match(line)
-                if match is not None:
-                    body = body.strip()
-                    self.macros[name] = Macro(name, args, body, location=macro_loc) 
-                    state = SourceState.OUTSIDE
-                else:
-                    body += line
-            else:
-                assert False, "Invalid state."
-        if state == SourceState.INSIDE:
-            raise RuntimeError("%s. Missing #end tag for macro: %s" % (loc, name))
-        return self
+            adder.process_line(line, loc)
+        adder.close(loc)
+        if not local:
+            self.macros.update(adder.macros)
+        return adder.macros
 
     def _parse_args(self, arg_list, loc):
         args = []
@@ -140,26 +172,57 @@ class Preprocessor:
         return args
 
     def process(self, go_file, file_name=DEFAULT_FILE_NAME):
-        for i, line in enumerate(go_file):
-            loc = Location(i + 1, file_name)
-            match = self.macro_usage.match(line)
-            if match is not None:
-                name = match.group(1)
-                arg_list = self._parse_args(match.group(2), loc)
-                if name not in self.macros:
-                    raise RuntimeError("%s. Macro %s not defined." % (loc, name))
-                try:
-                    body = self.macros[name].run(arg_list)
-                except RuntimeError as e:
-                    raise RuntimeError("%s. Error encountered while running macro %s: %s" % (loc, name, e))
-                for newline in body.split("\n"):
-                    yield "%s\n" % newline
-            else:
+        if self.allow_source_defs:
+            adder = MacroAdder(self.regexps, base_macros=self.macros)
+            macros = adder.macros
+        else:
+            macros = dict(self.macros)
+        loc = None
+        def generate_lines():
+            for i, line in enumerate(go_file):
+                loc = Location(i + 1, file_name)
+                match = self.regexps.macro_usage.match(line)
+                import_match = self.regexps.import_statement.match(line)
+                if match is not None:
+                    name = match.group(1)
+                    arg_list = self._parse_args(match.group(2), loc)
+                    if name not in macros:
+                        raise RuntimeError("%s. Macro %s not defined." % (loc, name))
+                    try:
+                        body = macros[name].run(arg_list)
+                    except RuntimeError as e:
+                        raise RuntimeError("%s. Error encountered while running macro %s: %s" % (loc, name, e))
+                    for newline in body.split("\n"):
+                        yield loc, "%s\n" % newline
+                elif import_match is not None:
+                    path = import_match.group(1)
+                    if file_name != DEFAULT_FILE_NAME and os.path.exists(file_name):
+                        rel_start = os.path.dirname(os.path.abspath(file_name))
+                    else:
+                        rel_start = os.curdir
+                    path = os.path.join(rel_start, path)
+                    if not os.path.exists(path):
+                        raise RuntimeError("%s. Imported file %s does not exist." % (loc, path))
+                    try:
+                        with open(path, "r") as f:
+                            imported_macros = self.add_macros_from(f, file_name=path, local=True)
+                            macros.update(imported_macros)
+                    except Exception as e:
+                        raise RuntimeError("%s. Error parsing file %s: %s" % (loc, path, e))
+                else:
+                    yield loc, line
+        for loc, line in generate_lines():
+            print_line = True
+            if self.allow_source_defs:
+                print_line = not adder.process_line(line, loc)
+            if print_line:
                 yield line
+        if self.allow_source_defs:
+            adder.close(loc)
     
     @classmethod
-    def preprocess(cls, macros=None, outfile="/dev/stdout", infile="/dev/stdin", comment="//"):
-        self = cls(comment)
+    def preprocess(cls, macros=None, outfile="/dev/stdout", infile="/dev/stdin", comment="//", allow_source_defs=True):
+        self = cls(comment, allow_source_defs)
         for macro in macros:
             with open(macro, "r") as f:
                 self.add_macros_from(f, file_name=macro)
@@ -175,7 +238,7 @@ class Preprocessor:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Simple string-based (no AST) preprocessing for Golang')
+    parser = argparse.ArgumentParser(description='A simple language-agnostic string-based (no AST) macro preprocessor')
     parser.add_argument('-m', '--macros', type=str, nargs='+', dest="macros",
                                 help='files to be used to define macros')
     parser.add_argument('-i', '--input', type=str, dest="infile", default="&0",
@@ -184,6 +247,9 @@ if __name__ == "__main__":
                                 help='postprocessed file saved to')
     parser.add_argument('-c', '--comment', type=str, dest="comment", default="//",
                                 help='string for starting a line comment')
+    parser.add_argument('--no-src-defs', dest='allow_source_defs', action='store_const',
+                                const=False, default=True,
+                                help='do not allow macros to be defined in source files')
     args = vars(parser.parse_args())
     args["macros"] = list(itertools.chain.from_iterable(map(glob.glob, args["macros"] or [])))
     special_replace = {"&0": "/dev/stdin",
