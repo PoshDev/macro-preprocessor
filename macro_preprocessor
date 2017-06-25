@@ -172,6 +172,14 @@ class Preprocessor:
         return args
 
     def process(self, go_file, file_name=DEFAULT_FILE_NAME):
+        yield "%s .----------------------------------------.\n" % self.comment
+        yield "%s |      WARNING: AUTO-GENERATED CODE      |\n" % self.comment
+        yield "%s .----------------------------------------.\n" % self.comment
+        yield "%s This code was automatically generated using\n" % self.comment
+        yield "%s https://github.com/PoshDev/macro-preprocessor .\n" % self.comment
+        if file_name != DEFAULT_FILE_NAME:
+            yield "%s The original source file was %s.\n" % (self.comment, file_name)
+        yield "%s XXX: DO NOT CHANGE THIS FILE!!!\n" % self.comment
         if self.allow_source_defs:
             adder = MacroAdder(self.regexps, base_macros=self.macros)
             macros = adder.macros
