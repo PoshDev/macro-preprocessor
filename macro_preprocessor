@@ -204,6 +204,7 @@ class Preprocessor:
                         yield loc, "%s\n" % newline
                 elif import_match is not None:
                     path = import_match.group(1)
+                    path = os.path.expandvars(path) 
                     if file_name != DEFAULT_FILE_NAME and os.path.exists(file_name):
                         rel_start = os.path.dirname(os.path.abspath(file_name))
                     else:
