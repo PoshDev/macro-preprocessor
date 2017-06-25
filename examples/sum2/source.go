@@ -1,12 +1,12 @@
 package main
 
-//#define SUM(TYPE)
+/*#define SUM (TYPE)*/
 func SumTYPE(a TYPE, b TYPE) TYPE {
 	return a + b
 }
 
-//#end
+/*#end*/
 
-//#macro SUM((int))
+//#macro SUM (int)
 
-//#macro SUM((float64))
+//#macro SUM (float64)

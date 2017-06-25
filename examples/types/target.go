@@ -7,10 +7,25 @@
 // XXX: DO NOT CHANGE THIS FILE!!!
 package main
 
-func Sumint(a int, b int) int {
-	return a + b
+
+type Service interface {
+	
+	func String() string
+
 }
 
-func Sumfloat64(a float64, b float64) float64 {
-	return a + b
+type service struct {
+	
+	name string `json:"n"`
+
 }
+
+var _ Service = (*service)(nil)
+
+func NewService() Service {
+	
+	return &service{"Untitled"}
+
+}
+
+
